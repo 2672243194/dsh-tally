@@ -1,7 +1,7 @@
 {
   "name": "dsh-tally",
-  "version": "0.3.0",
-  "description": "Personal bookkeeping plugin for DeepSeek Harness: record expenses/income (single or batch), list, monthly/annual stats with month-over-month trend, budgets with progress/over-limit alerts, soft-delete with restore, CSV export. Zero runtime dependencies, local JSON storage, token-efficient output.",
+  "version": "0.4.0",
+  "description": "Personal bookkeeping plugin for DeepSeek Harness: record expenses/income (single or batch), list, monthly/annual stats with month-over-month trend, budgets with progress/over-limit alerts, soft-delete with restore, CSV export and self-contained HTML reports. Zero runtime dependencies, local JSON storage, token-efficient output.",
   "type": "module",
   "main": "index.js",
   "dsh": {

@@ -271,6 +271,39 @@ await aok('empty month export writes nothing and reports zero', async () => {
   assert.ok(text.includes('没有记录'))
 })
 
+await aok('exports self-contained HTML report (format=html)', async () => {
+  const r = await exportT.execute({ month: '2026-03', format: 'html' })
+  assert.equal(r.format, 'html')
+  assert.ok(r.file.endsWith('tally-report-2026-03.html') || r.file.endsWith('tally-report-2026-03.html'), `html path: ${r.file}`)
+  assert.ok(existsSync(r.file), 'html file written')
+  const html = readFileSync(r.file, 'utf8')
+  assert.ok(html.startsWith('<!DOCTYPE html>'), 'valid html document')
+  assert.ok(html.includes('tally 账目报告'), 'title present')
+  assert.ok(html.includes('2026-03-01'), 'entry data embedded')
+  assert.ok(html.includes('餐饮'), 'chinese data embedded')
+  assert.ok(html.includes('const DATA = '), 'data payload embedded')
+  assert.ok(html.includes('显示已删'), 'deleted toggle present')
+  const text = exportT.output.render(null, r)[0].text
+  assert.ok(text.includes('HTML 账目报告'), `render: ${text.slice(0, 60)}`)
+  assert.ok(text.includes(r.file))
+})
+
+await aok('html report excludes script-breaking payloads', async () => {
+  await add.execute({ amount: 3, category: '其他', date: '2026-03-21', note: '</script><script>alert(1)</script>' })
+  const r = await exportT.execute({ month: '2026-03', format: 'html' })
+  const html = readFileSync(r.file, 'utf8')
+  assert.ok(!html.includes('</script><script>'), 'no script breakout from payload')
+  assert.equal((html.match(/<script>/g) || []).length, 1, 'only the single real script block')
+})
+
+await aok('html report works when current month is empty (all months embedded)', async () => {
+  const r = await exportT.execute({ month: '2020-01', format: 'html' })
+  assert.equal(r.format, 'html')
+  assert.ok(existsSync(r.file), 'report still generated with full data')
+  const html = readFileSync(r.file, 'utf8')
+  assert.ok(html.includes('2026-03-01'), 'other months still embedded')
+})
+
 console.log('tally_batch')
 await aok('writes multiple entries in one call', async () => {
   const r = await batch.execute({

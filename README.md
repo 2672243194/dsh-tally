@@ -93,7 +93,10 @@ npx @deepseek-ai/dsh plugin --profile web add ./dsh-tally
 
 **`tally_budget(month?, amount?)`** — 预算：传 `amount` 设置/覆盖当月预算，省略则查询（预算/已支出/剩余/是否超支）；`tally_stats` 同步显示预算状态
 
-**`tally_export(month?, path?)`** — CSV 导出：**真正写文件**（默认 `<账本目录>/exports/tally-YYYY-MM.csv`），带 **UTF-8 BOM**（Excel/WPS 双击打开中文正常），返回文件路径 + 前 3 行预览；传 `path` 自定义输出位置（相对路径基于 DSH home 解析）；`csv` 字段为原始内容供程序化处理
+**`tally_export(month?, path?, format?)`** — 导出
+- `format: "csv"`（默认）：**真正写文件**（默认 `<账本目录>/exports/tally-YYYY-MM.csv`），带 **UTF-8 BOM**（Excel/WPS 双击打开中文正常），返回文件路径 + 前 3 行预览；
+- `format: "html"`：生成**自包含 HTML 账目报告**（`tally-report-YYYY-MM.html`，浏览器双击即开）：统计卡片（支出/收入/结余/环比/预算进度）、类别占比图、月份/类别筛选 + 搜索、显示已删开关——**嵌入全部月份数据**，无需服务；
+- 传 `path` 自定义输出位置（相对路径基于 DSH home 解析）。
 
 ## 存储与安全
 
@@ -112,7 +115,7 @@ npx @deepseek-ai/dsh plugin --profile web add ./dsh-tally
 ## 开发
 
 ```bash
-node test.mjs          # 33 个零依赖断言（增删查改/批量/汇总/环比/预算/软删恢复/导出/并发/持久化）
+node test.mjs          # 36 个零依赖断言（增删查改/批量/汇总/环比/预算/软删恢复/CSV+HTML导出/并发/持久化）
 
 # 端到端验证（临时环境，不污染真实账本）
 export DSH_HOME=./.dsh-tally-verify
@@ -135,6 +138,7 @@ dsh --profile headless "用 tally_add 记一笔早餐 12 元，然后 tally_stat
 - [ ] 多账本（工作/生活分开记账）
 - [ ] 周期账（每月自动重复的固定支出）
 - [ ] CSV 导入（从其他记账 App 迁移数据）
+- [ ] `tally_web` 本地网页服务（网页里直接编辑写回账本——静态 HTML 受浏览器沙箱限制只能看不能改，需要本地服务才支持）
 
 ## 支持
 

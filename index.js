@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { buildHtmlReport } from './report.js'
 
 export const name = 'dsh-tally'
 export const inject = ['tools']
@@ -556,16 +557,17 @@ function toolExport(cfg) {
   return {
     name: 'tally_export',
     description:
-      'Export recorded entries to a real CSV file (UTF-8 BOM, opens cleanly in Excel/WPS) and return its path. ' +
+      'Export the ledger. format=csv writes a CSV file (UTF-8 BOM, opens cleanly in Excel/WPS); ' +
+      'format=html writes a self-contained HTML report (open in any browser: stats, category chart, filterable table). ' +
       'Defaults to the current month. Pass path to choose the output location (relative paths resolve against the DSH home). ' +
-      'Omit path to write to <ledger-dir>/exports/tally-YYYY-MM.csv. ' +
-      'Returns { file, count, bytes, csv }; the csv field is the raw content for programmatic use, the render shows the file path and a short preview.',
+      'Returns { file, count, bytes, format }.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         month: { type: 'string', description: 'Month YYYY-MM (default current month)' },
-        path: { type: 'string', description: 'Optional output file path (default <ledger-dir>/exports/tally-YYYY-MM.csv)' },
+        format: { type: 'string', enum: ['csv', 'html'], description: 'csv = spreadsheet file (default); html = browser report' },
+        path: { type: 'string', description: 'Optional output file path (default <ledger-dir>/exports/...)' },
       },
     },
     timeoutMs: 10000,
@@ -574,6 +576,19 @@ function toolExport(cfg) {
       const file = resolveStoragePath(cfg)
       const data = loadLedger(file)
       const month = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : todayISO().slice(0, 7)
+      const format = args.format === 'html' ? 'html' : 'csv'
+      const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+      const activeCount = data.entries.filter((e) => activeOnly(e) && e.date.startsWith(month)).length
+      if (format === 'html') {
+        if (!data.entries.length) return { month, count: 0, format }
+        const html = buildHtmlReport({ entries: data.entries, budgets: data.budgets, currency: cfg.currency, month })
+        const outPath = args.path
+          ? path.resolve(home, String(args.path))
+          : path.join(path.dirname(file), 'exports', `tally-report-${month}.html`)
+        mkdirSync(path.dirname(outPath), { recursive: true })
+        writeFileSync(outPath, html, 'utf8')
+        return { month, count: activeCount, format, file: outPath, bytes: Buffer.byteLength(html, 'utf8') }
+      }
       const entries = data.entries
         .filter((e) => activeOnly(e) && e.date.startsWith(month))
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt))
@@ -583,13 +598,12 @@ function toolExport(cfg) {
       // UTF-8 BOM prefix: Excel/WPS on zh-CN Windows would read the file as GBK
       // (garbling Chinese) without it.
       const csv = '\uFEFF' + rows.map((r) => r.map(csvField).join(',')).join('\n')
-      const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
       const outPath = args.path
         ? path.resolve(home, String(args.path))
         : path.join(path.dirname(file), 'exports', `tally-${month}.csv`)
       mkdirSync(path.dirname(outPath), { recursive: true })
       writeFileSync(outPath, csv, 'utf8')
-      return { month, count: entries.length, file: outPath, bytes: Buffer.byteLength(csv, 'utf8'), csv }
+      return { month, count: entries.length, format, file: outPath, bytes: Buffer.byteLength(csv, 'utf8'), csv }
     },
   }
 }
@@ -597,7 +611,10 @@ function toolExport(cfg) {
 function renderExport(v) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
-  if (!v.count) return `[${v.month}] 没有记录可导出`
+  if (!v.count && !v.file) return `[${v.month}] 没有记录可导出`
+  if (v.format === 'html') {
+    return `已导出 HTML 账目报告（当月 ${v.count} 笔 · ${v.bytes} 字节，含全部月份数据）：\n${v.file}\n浏览器打开即可查看（月份/类别筛选、统计卡片、类别占比图）。修改账目请回到对话。`
+  }
   const preview = v.csv.split('\n').slice(0, 4).join('\n')
   return `已导出 CSV（${v.count} 笔 · ${v.bytes} 字节 · UTF-8 BOM，Excel/WPS 可直接打开）：\n${v.file}\n预览：\n${preview}${v.count > 3 ? '\n...' : ''}`
 }
