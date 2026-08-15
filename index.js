@@ -431,7 +431,11 @@ function toolExport(cfg) {
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt))
       const rows = [['date', 'type', 'category', 'amount', 'note']]
       for (const e of entries) rows.push([e.date, e.type, e.category, String(e.amount), e.note || ''])
-      return { month, count: entries.length, csv: rows.map((r) => r.map(csvField).join(',')).join('\n') }
+      // UTF-8 BOM prefix: Excel/WPS on zh-CN Windows would read the file as GBK
+      // (garbling Chinese) without it. Keep it on the CSV payload so saving the
+      // text as a .csv file opens correctly in Excel.
+      const csv = '\uFEFF' + rows.map((r) => r.map(csvField).join(',')).join('\n')
+      return { month, count: entries.length, csv }
     },
   }
 }
@@ -440,7 +444,7 @@ function renderExport(v) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
   if (!v.count) return `[${v.month}] 没有记录可导出`
-  return `[${v.month}] 共 ${v.count} 笔，CSV：\n${v.csv}`
+  return `[${v.month}] 共 ${v.count} 笔，CSV（UTF-8 BOM，可直接存为 .csv 用 Excel/WPS 打开）：\n${v.csv}`
 }
 
 export function apply(ctx, config) {

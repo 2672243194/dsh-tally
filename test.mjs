@@ -225,12 +225,13 @@ await aok('year param ignored when month present', async () => {
 })
 
 console.log('tally_export')
-await aok('exports CSV with header and entries sorted by date', async () => {
+await aok('exports CSV with UTF-8 BOM, header and entries sorted by date', async () => {
   const r = await exportT.execute({ month: '2026-03' })
   assert.equal(r.count, 4) // 20/30/100 expense + 8000 income
+  assert.equal(r.csv.charCodeAt(0), 0xfeff, 'CSV starts with UTF-8 BOM (Excel compat)')
   const lines = r.csv.split('\n')
   assert.equal(lines.length, 5) // header + 4
-  assert.equal(lines[0], 'date,type,category,amount,note')
+  assert.ok(lines[0].startsWith('\uFEFFdate,type,category,amount,note'), `header with BOM: ${lines[0]}`)
   assert.ok(lines[1].startsWith('2026-03-01,expense,餐饮,20,'), `sorted first: ${lines[1]}`)
   assert.ok(lines[4].startsWith('2026-03-10,income,工资,8000,'), `income last: ${lines[4]}`)
   const text = exportT.output.render(null, r)[0].text

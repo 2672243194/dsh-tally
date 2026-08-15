@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1] - 2026-08-15
+
+### 修复
+
+- `tally_export` 的 CSV 加 **UTF-8 BOM**：修复中文 Windows 下 Excel/WPS 按 GBK 打开导致中文乱码（"餐饮"→"椁愰ギ"）。带 BOM 的 CSV 保存为 .csv 后双击即可正常显示。
+
 ## [0.2.0] - 2026-08-15
 
 ### 新增
