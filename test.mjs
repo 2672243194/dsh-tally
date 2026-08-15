@@ -15,12 +15,14 @@ const fakeCtx = {
 apply(fakeCtx, { storagePath: path.join(tmpDir, 'tally.json') })
 
 const add = tools.find((t) => t.name === 'tally_add')
+const batch = tools.find((t) => t.name === 'tally_batch')
 const list = tools.find((t) => t.name === 'tally_list')
 const stats = tools.find((t) => t.name === 'tally_stats')
 const remove = tools.find((t) => t.name === 'tally_remove')
+const restore = tools.find((t) => t.name === 'tally_restore')
 const budget = tools.find((t) => t.name === 'tally_budget')
 const exportT = tools.find((t) => t.name === 'tally_export')
-assert.ok(add && list && stats && remove && budget && exportT, 'all six tools must register')
+assert.ok(add && batch && list && stats && remove && restore && budget && exportT, 'all eight tools must register')
 
 let passed = 0
 function ok(name, fn) {
@@ -267,6 +269,92 @@ await aok('empty month export writes nothing and reports zero', async () => {
   assert.equal(r.file, undefined, 'no file for empty month')
   const text = exportT.output.render(null, r)[0].text
   assert.ok(text.includes('没有记录'))
+})
+
+console.log('tally_batch')
+await aok('writes multiple entries in one call', async () => {
+  const r = await batch.execute({
+    entries: [
+      { amount: 28, category: '餐饮', date: '2026-06-01', note: '午饭' },
+      { amount: 15, category: '交通', date: '2026-06-02', note: '地铁' },
+      { amount: 5000, type: 'income', category: '工资', date: '2026-06-05' },
+    ],
+  })
+  assert.equal(r.total, 3)
+  assert.equal(r.written, 3)
+  assert.equal(r.errors.length, 0)
+  assert.ok(r.entries.every((e) => /^[0-9a-f]{8}$/.test(e.id)))
+  const text = batch.output.render(null, r)[0].text
+  assert.ok(text.includes('已记 3/3 笔'))
+})
+
+await aok('skips invalid entries and reports by index', async () => {
+  const r = await batch.execute({ entries: [{ amount: 10 }, { amount: 0 }, { amount: 20 }] })
+  assert.equal(r.written, 2)
+  assert.equal(r.errors.length, 1)
+  assert.equal(r.errors[0].index, 1)
+  const text = batch.output.render(null, r)[0].text
+  assert.ok(text.includes('跳过 1 笔'))
+})
+
+await aok('rejects empty array', async () => {
+  const r = await batch.execute({ entries: [] })
+  assert.ok(r.error)
+})
+
+console.log('trend (month-over-month)')
+await aok('computes month-over-month change', async () => {
+  const r = await stats.execute({ month: '2026-06' })
+  assert.equal(r.prevExpense, 12.5) // 2026-05 (renders test entry)
+  assert.equal(r.changePct, 244) // (43-12.5)/12.5 = +244%
+  const text = stats.output.render(null, r)[0].text
+  assert.ok(text.includes('较上月 +244%'), `render trend: ${text}`)
+})
+
+await aok('no trend when previous month has no spending', async () => {
+  const r = await stats.execute({ month: '2026-01' })
+  assert.equal(r.prevExpense, 0)
+  assert.equal(r.changePct, null)
+})
+
+console.log('soft delete & restore')
+await aok('remove soft-deletes; restore brings it back', async () => {
+  const added = await add.execute({ amount: 66, category: '购物', date: '2026-06-10', note: '待删测试' })
+  await remove.execute({ id: added.id, confirm: true })
+  const hidden = await list.execute({ month: '2026-06' })
+  assert.ok(!hidden.entries.some((e) => e.id === added.id), 'deleted entry hidden by default')
+  const withDel = await list.execute({ month: '2026-06', includeDeleted: true })
+  const found = withDel.entries.find((e) => e.id === added.id)
+  assert.ok(found && found.deleted, 'visible with includeDeleted and flagged')
+  const s = await stats.execute({ month: '2026-06' })
+  assert.ok(!s.topCategories.some((c) => c.category === '购物' && c.amount >= 66), 'excluded from stats')
+  const r = await restore.execute({ id: added.id })
+  assert.equal(r.restored, true)
+  const back = await list.execute({ month: '2026-06' })
+  assert.ok(back.entries.some((e) => e.id === added.id), 'restored entry visible again')
+  const text = restore.output.render(null, r)[0].text
+  assert.ok(text.includes('已恢复'))
+})
+
+await aok('restore of unknown or active id errors', async () => {
+  assert.ok((await restore.execute({ id: 'deadbeef' })).error)
+  const added = await add.execute({ amount: 5, category: '其他', date: '2026-06-11' })
+  assert.ok((await restore.execute({ id: added.id })).error, 'active entry is not restorable')
+})
+
+console.log('budget progress alert')
+await aok('flags 80% usage before over-budget', async () => {
+  await add.execute({ amount: 80, category: '餐饮', date: '2026-07-10' })
+  await budget.execute({ month: '2026-07', amount: 100 })
+  const near = await stats.execute({ month: '2026-07' })
+  assert.equal(near.budgetNear, true, '80/100 hits the 80% threshold')
+  assert.equal(near.budgetOver, false)
+  const text = stats.output.render(null, near)[0].text
+  assert.ok(text.includes('已使用 80%'), `render progress alert: ${text}`)
+  await add.execute({ amount: 30, category: '餐饮', date: '2026-07-12' })
+  const over = await stats.execute({ month: '2026-07' })
+  assert.equal(over.budgetOver, true, '110 > 100 is over budget')
+  assert.equal(over.budgetNear, false)
 })
 
 console.log(`\n${passed} assertions passed`)

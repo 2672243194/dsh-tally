@@ -83,6 +83,18 @@ function normalizeAmount(v) {
   return Math.round(n * 100) / 100
 }
 
+function buildEntry(raw) {
+  const amount = normalizeAmount(raw.amount)
+  if (amount === null) return { error: 'amount must be a positive number (max 2 decimals)' }
+  const type = raw.type === 'income' ? 'income' : 'expense'
+  const category = String(raw.category || '其他').slice(0, 20)
+  const note = String(raw.note || '').slice(0, 50)
+  const date = isValidDate(raw.date) ? raw.date : todayISO()
+  return { entry: { id: randomUUID(), date, type, category, note, amount, createdAt: Date.now() } }
+}
+
+const activeOnly = (e) => !e.deleted
+
 function entryLine(e, currency) {
   const type = e.type === 'income' ? '收' : '支'
   const note = e.note ? ` ${e.note}` : ''
@@ -116,20 +128,16 @@ function toolAdd(cfg) {
     timeoutMs: 5000,
     output: { schema: { type: 'object', additionalProperties: true }, render: (_a, v) => [{ type: 'text', text: renderAdd(v, cfg) }] },
     async execute(args) {
-      const amount = normalizeAmount(args.amount)
-      if (amount === null) return { error: 'amount must be a positive number (max 2 decimals)' }
-      const type = args.type === 'income' ? 'income' : 'expense'
-      const category = String(args.category || '其他').slice(0, 20)
-      const note = String(args.note || '').slice(0, 50)
-      const date = isValidDate(args.date) ? args.date : todayISO()
-      const entry = { id: randomUUID(), date, type, category, note, amount, createdAt: Date.now() }
+      const built = buildEntry(args || {})
+      if (built.error) return { error: built.error }
+      const entry = built.entry
       const file = resolveStoragePath(cfg)
       await enqueueWrite(() => {
         const data = loadLedger(file)
         data.entries.push(entry)
         saveLedger(file, data)
       })
-      return { id: shortId(entry.id), date, type, category, note, amount }
+      return { id: shortId(entry.id), date: entry.date, type: entry.type, category: entry.category, note: entry.note, amount: entry.amount }
     },
   }
 }
@@ -140,6 +148,77 @@ function renderAdd(v, cfg) {
   const type = v.type === 'income' ? '收入' : '支出'
   const note = v.note ? ` · ${v.note}` : ''
   return `已记 ${type} ${fmtDate(v.date)} ${v.category} ${fmtMoney(v.amount, cfg.currency)}${note} (id: ${v.id})`
+}
+
+// ---- tally_batch ----
+function toolBatch(cfg) {
+  return {
+    name: 'tally_batch',
+    description:
+      'Record multiple entries in one call (handy for back-filling several expenses at once). ' +
+      'entries is an array of objects with the same fields as tally_add (amount required). ' +
+      'Valid entries are written together; invalid ones are skipped and reported by index.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        entries: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              amount: { type: 'number', description: 'Amount in yuan (positive, up to 2 decimals)' },
+              type: { type: 'string', enum: ['expense', 'income'], description: 'expense (default) or income' },
+              category: { type: 'string', description: 'Category (default 其他)' },
+              note: { type: 'string', description: 'Optional note (max 50 chars)' },
+              date: { type: 'string', description: 'Date YYYY-MM-DD (default today)' },
+            },
+            required: ['amount'],
+          },
+        },
+      },
+      required: ['entries'],
+    },
+    timeoutMs: 10000,
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a, v) => [{ type: 'text', text: renderBatch(v, cfg) }] },
+    async execute(args) {
+      const rawList = Array.isArray(args.entries) ? args.entries : []
+      if (!rawList.length) return { error: 'entries must be a non-empty array' }
+      const built = []
+      const errors = []
+      rawList.forEach((raw, i) => {
+        const r = buildEntry(raw || {})
+        if (r.error) errors.push({ index: i, error: r.error })
+        else built.push(r.entry)
+      })
+      if (built.length) {
+        const file = resolveStoragePath(cfg)
+        await enqueueWrite(() => {
+          const data = loadLedger(file)
+          for (const e of built) data.entries.push(e)
+          saveLedger(file, data)
+        })
+      }
+      return {
+        total: rawList.length,
+        written: built.length,
+        errors,
+        entries: built.map((e) => ({ id: shortId(e.id), date: e.date, type: e.type, category: e.category, amount: e.amount, note: e.note })),
+      }
+    },
+  }
+}
+
+function renderBatch(v, cfg) {
+  if (typeof v === 'string') return v
+  if (v.error) return `Error: ${v.error}`
+  const lines = v.entries.map((e) => entryLine(e, cfg.currency))
+  let out = `已记 ${v.written}/${v.total} 笔：\n${lines.join('\n')}`
+  if (v.errors.length) {
+    out += `\n跳过 ${v.errors.length} 笔（第 ${v.errors.map((x) => x.index + 1).join('、')} 项：${v.errors[0].error}${v.errors.length > 1 ? ' 等' : ''}）`
+  }
+  return out
 }
 
 // ---- tally_list ----
@@ -158,6 +237,7 @@ function toolList(cfg) {
         category: { type: 'string', description: 'Filter by exact category' },
         keyword: { type: 'string', description: 'Search term in note or category' },
         limit: { type: 'number', description: 'Max entries to return (range 1-50, default 20)' },
+        includeDeleted: { type: 'boolean', description: 'Also list soft-deleted entries (marked [已删]), for finding ids to restore' },
       },
     },
     timeoutMs: 10000,
@@ -169,13 +249,15 @@ function toolList(cfg) {
       const category = args.category ? String(args.category) : null
       const keyword = args.keyword ? String(args.keyword).toLowerCase() : null
       const limit = Math.max(1, Math.min(50, Number(args.limit) || 20))
+      const showDeleted = args.includeDeleted === true
       const entries = data.entries
         .filter((e) => e.date.startsWith(month))
+        .filter((e) => showDeleted || activeOnly(e))
         .filter((e) => !category || e.category === category)
         .filter((e) => !keyword || e.note.toLowerCase().includes(keyword) || e.category.toLowerCase().includes(keyword))
         .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt))
       const shown = entries.slice(0, limit)
-      return { month, total: entries.length, shown: shown.length, limit, entries: shown.map((e) => ({ id: shortId(e.id), date: e.date, type: e.type, category: e.category, amount: e.amount, note: e.note })) }
+      return { month, total: entries.length, shown: shown.length, limit, entries: shown.map((e) => ({ id: shortId(e.id), date: e.date, type: e.type, category: e.category, amount: e.amount, note: e.note, deleted: !!e.deleted })) }
     },
   }
 }
@@ -184,7 +266,7 @@ function renderList(v, cfg) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
   if (!v.entries.length) return `[${v.month}] 没有记录`
-  const lines = v.entries.map((e) => entryLine(e, cfg.currency))
+  const lines = v.entries.map((e) => entryLine(e, cfg.currency) + (e.deleted ? ' [已删]' : ''))
   const more = v.total > v.shown ? `\n(共 ${v.total} 笔，显示前 ${v.shown} 笔 — 可缩小范围或增大 limit)` : ''
   return `[${v.month}] ${v.total} 笔:\n${lines.join('\n')}${more}`
 }
@@ -216,7 +298,7 @@ function toolStats(cfg) {
         const months = []
         for (let m = 1; m <= 12; m++) {
           const prefix = `${yearArg}-${String(m).padStart(2, '0')}`
-          const es = data.entries.filter((e) => e.date.startsWith(prefix))
+          const es = data.entries.filter((e) => activeOnly(e) && e.date.startsWith(prefix))
           let exp = 0
           let inc = 0
           for (const e of es) if (e.type === 'income') inc += e.amount; else exp += e.amount
@@ -240,7 +322,7 @@ function toolStats(cfg) {
         }
       }
       const month = monthArg || todayISO().slice(0, 7)
-      const entries = data.entries.filter((e) => e.date.startsWith(month))
+      const entries = data.entries.filter((e) => e.date.startsWith(month) && activeOnly(e))
       let expense = 0
       let income = 0
       const byCat = new Map()
@@ -254,6 +336,12 @@ function toolStats(cfg) {
       const top = [...byCat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
       const days = new Set(entries.map((e) => e.date)).size || 1
       const budget = data.budgets[month] || 0
+      const [py, pm] = month.split('-').map(Number)
+      const prevMonth = pm === 1 ? `${py - 1}-12` : `${py}-${String(pm - 1).padStart(2, '0')}`
+      const prevExpense = data.entries
+        .filter((e) => activeOnly(e) && e.date.startsWith(prevMonth) && e.type === 'expense')
+        .reduce((s, e) => s + e.amount, 0)
+      const changePct = prevExpense > 0 ? Math.round(((expense - prevExpense) / prevExpense) * 1000) / 10 : null
       return {
         month,
         expense: Math.round(expense * 100) / 100,
@@ -264,6 +352,10 @@ function toolStats(cfg) {
         topCategories: top.map(([c, a]) => ({ category: c, amount: Math.round(a * 100) / 100 })),
         budget: Math.round(budget * 100) / 100,
         budgetOver: budget > 0 && expense > budget,
+        budgetNear: budget > 0 && expense >= budget * 0.8 && expense <= budget,
+        prevMonth,
+        prevExpense: Math.round(prevExpense * 100) / 100,
+        changePct,
       }
     },
   }
@@ -282,13 +374,18 @@ function renderStats(v, cfg) {
   const top = v.topCategories.length
     ? `\n类别 Top：${v.topCategories.map((t) => `${t.category} ${fmtMoney(t.amount, cfg.currency)}`).join(' · ')}`
     : ''
+  let trendNote = ''
+  if (v.changePct !== null) trendNote = `\n较上月 ${v.changePct >= 0 ? '+' : ''}${v.changePct}%（上月 ${fmtMoney(v.prevExpense, cfg.currency)}）`
+  else if (v.expense > 0) trendNote = '\n（上月无支出）'
   let budgetNote = ''
   if (v.budget) {
     budgetNote = v.budgetOver
       ? `\n⚠️ 预算 ${fmtMoney(v.budget, cfg.currency)}，已超支 ${fmtMoney(v.expense - v.budget, cfg.currency)}`
-      : `\n预算 ${fmtMoney(v.budget, cfg.currency)} · 剩余 ${fmtMoney(v.budget - v.expense, cfg.currency)}`
+      : v.budgetNear
+        ? `\n⚠️ 预算 ${fmtMoney(v.budget, cfg.currency)} 已使用 80%，剩余 ${fmtMoney(v.budget - v.expense, cfg.currency)}`
+        : `\n预算 ${fmtMoney(v.budget, cfg.currency)} · 剩余 ${fmtMoney(v.budget - v.expense, cfg.currency)}`
   }
-  return `[${v.month}] 支出 ${fmtMoney(v.expense, cfg.currency)} · 收入 ${fmtMoney(v.income, cfg.currency)} · 结余 ${bal} · ${v.count} 笔 · 日均支出 ${fmtMoney(v.dailyAvg, cfg.currency)}${top}${budgetNote}`
+  return `[${v.month}] 支出 ${fmtMoney(v.expense, cfg.currency)} · 收入 ${fmtMoney(v.income, cfg.currency)} · 结余 ${bal} · ${v.count} 笔 · 日均支出 ${fmtMoney(v.dailyAvg, cfg.currency)}${top}${trendNote}${budgetNote}`
 }
 
 // ---- tally_remove ----
@@ -314,15 +411,18 @@ function toolRemove(cfg) {
       if (!id) return { error: 'id is required' }
       const file = resolveStoragePath(cfg)
       const data = loadLedger(file)
-      const match = data.entries.find((e) => shortId(e.id).toLowerCase() === id || e.id === id)
+      const match = data.entries.find((e) => activeOnly(e) && (shortId(e.id).toLowerCase() === id || e.id === id))
       if (!match) return { error: `未找到 id: ${id}` }
       if (args.confirm !== true) {
         return { needConfirm: true, entry: { id: shortId(match.id), date: match.date, type: match.type, category: match.category, amount: match.amount, note: match.note } }
       }
       await enqueueWrite(() => {
         const d = loadLedger(file)
-        const idx = d.entries.findIndex((e) => e.id === match.id)
-        if (idx >= 0) d.entries.splice(idx, 1)
+        const m = d.entries.find((e) => e.id === match.id)
+        if (m && !m.deleted) {
+          m.deleted = true
+          m.deletedAt = Date.now()
+        }
         saveLedger(file, d)
       })
       return { removed: true, id: shortId(match.id) }
@@ -333,10 +433,55 @@ function toolRemove(cfg) {
 function renderRemove(v, cfg) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
-  if (v.removed) return `已删除 (id: ${v.id})`
+  if (v.removed) return `已删除 (id: ${v.id}，可随时用 tally_restore 恢复)`
   if (v.needConfirm) {
-    return `确认删除这笔？再次调用 tally_remove 并传 confirm=true 才会删除：\n${entryLine(v.entry, cfg.currency)}`
+    return `确认删除这笔？再次调用 tally_remove 并传 confirm=true 才会删除（删除后可恢复）：\n${entryLine(v.entry, cfg.currency)}`
   }
+  return '操作未完成'
+}
+
+// ---- tally_restore ----
+function toolRestore(cfg) {
+  return {
+    name: 'tally_restore',
+    description:
+      'Restore a soft-deleted entry (tally_remove marks entries deleted, not erased). ' +
+      'Find the deleted entry id with tally_list(includeDeleted=true), then restore it here.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: 'Short id (8 chars) of the deleted entry to restore' },
+      },
+      required: ['id'],
+    },
+    timeoutMs: 5000,
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a, v) => [{ type: 'text', text: renderRestore(v, cfg) }] },
+    async execute(args) {
+      const id = String(args.id || '').trim().toLowerCase()
+      if (!id) return { error: 'id is required' }
+      const file = resolveStoragePath(cfg)
+      const data = loadLedger(file)
+      const match = data.entries.find((e) => e.deleted && (shortId(e.id).toLowerCase() === id || e.id === id))
+      if (!match) return { error: `未找到已删除的 id: ${id}` }
+      await enqueueWrite(() => {
+        const d = loadLedger(file)
+        const m = d.entries.find((e) => e.id === match.id)
+        if (m && m.deleted) {
+          delete m.deleted
+          delete m.deletedAt
+        }
+        saveLedger(file, d)
+      })
+      return { restored: true, id: shortId(match.id), date: match.date, type: match.type, category: match.category, amount: match.amount, note: match.note }
+    },
+  }
+}
+
+function renderRestore(v, cfg) {
+  if (typeof v === 'string') return v
+  if (v.error) return `Error: ${v.error}`
+  if (v.restored) return `已恢复：${entryLine(v, cfg.currency)}`
   return '操作未完成'
 }
 
@@ -375,7 +520,7 @@ function toolBudget(cfg) {
       }
       const budget = data.budgets[month] || 0
       const spent = data.entries
-        .filter((e) => e.date.startsWith(month) && e.type === 'expense')
+        .filter((e) => activeOnly(e) && e.date.startsWith(month) && e.type === 'expense')
         .reduce((s, e) => s + e.amount, 0)
       return {
         month,
@@ -430,7 +575,7 @@ function toolExport(cfg) {
       const data = loadLedger(file)
       const month = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : todayISO().slice(0, 7)
       const entries = data.entries
-        .filter((e) => e.date.startsWith(month))
+        .filter((e) => activeOnly(e) && e.date.startsWith(month))
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt))
       if (!entries.length) return { month, count: 0 }
       const rows = [['date', 'type', 'category', 'amount', 'note']]
@@ -459,11 +604,13 @@ function renderExport(v) {
 
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config || {}) }
-  console.log('[dsh-tally] plugin loaded; tools tally_add, tally_list, tally_stats, tally_remove, tally_budget, tally_export')
+  console.log('[dsh-tally] plugin loaded; tools tally_add, tally_batch, tally_list, tally_stats, tally_remove, tally_restore, tally_budget, tally_export')
   ctx.tools.register(toolAdd(cfg))
+  ctx.tools.register(toolBatch(cfg))
   ctx.tools.register(toolList(cfg))
   ctx.tools.register(toolStats(cfg))
   ctx.tools.register(toolRemove(cfg))
+  ctx.tools.register(toolRestore(cfg))
   ctx.tools.register(toolBudget(cfg))
   ctx.tools.register(toolExport(cfg))
 }
