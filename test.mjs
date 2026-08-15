@@ -225,17 +225,31 @@ await aok('year param ignored when month present', async () => {
 })
 
 console.log('tally_export')
-await aok('exports CSV with UTF-8 BOM, header and entries sorted by date', async () => {
+await aok('exports CSV file with UTF-8 BOM (default path)', async () => {
   const r = await exportT.execute({ month: '2026-03' })
   assert.equal(r.count, 4) // 20/30/100 expense + 8000 income
   assert.equal(r.csv.charCodeAt(0), 0xfeff, 'CSV starts with UTF-8 BOM (Excel compat)')
+  assert.ok(r.file.endsWith('exports/tally-2026-03.csv') || r.file.endsWith('exports\\tally-2026-03.csv'), `default path: ${r.file}`)
+  assert.ok(existsSync(r.file), 'file written to disk')
+  const buf = readFileSync(r.file)
+  assert.deepEqual([...buf.slice(0, 3)], [0xef, 0xbb, 0xbf], 'file bytes start with EF BB BF')
+  assert.ok(buf.length > 0 && r.bytes === buf.length, 'byte count matches')
   const lines = r.csv.split('\n')
-  assert.equal(lines.length, 5) // header + 4
   assert.ok(lines[0].startsWith('\uFEFFdate,type,category,amount,note'), `header with BOM: ${lines[0]}`)
   assert.ok(lines[1].startsWith('2026-03-01,expense,餐饮,20,'), `sorted first: ${lines[1]}`)
   assert.ok(lines[4].startsWith('2026-03-10,income,工资,8000,'), `income last: ${lines[4]}`)
   const text = exportT.output.render(null, r)[0].text
-  assert.ok(text.includes('共 4 笔'))
+  assert.ok(text.includes('已导出 CSV'), `render mentions export: ${text.slice(0, 60)}`)
+  assert.ok(text.includes(r.file), 'render shows the file path')
+  assert.ok(text.includes('预览'), 'render includes preview')
+})
+
+await aok('writes to a custom path when provided', async () => {
+  const custom = path.join(tmpDir, 'custom', 'out.csv')
+  const r = await exportT.execute({ month: '2026-03', path: custom })
+  assert.equal(r.file, custom)
+  assert.ok(existsSync(custom), 'custom file written')
+  assert.deepEqual([...readFileSync(custom).slice(0, 3)], [0xef, 0xbb, 0xbf])
 })
 
 await aok('escapes commas and quotes per RFC-4180', async () => {
@@ -247,9 +261,10 @@ await aok('escapes commas and quotes per RFC-4180', async () => {
   assert.ok(line.includes('"a,b""c"'), `note escaped: ${line}`)
 })
 
-await aok('empty month export returns zero count', async () => {
+await aok('empty month export writes nothing and reports zero', async () => {
   const r = await exportT.execute({ month: '2020-01' })
   assert.equal(r.count, 0)
+  assert.equal(r.file, undefined, 'no file for empty month')
   const text = exportT.output.render(null, r)[0].text
   assert.ok(text.includes('没有记录'))
 })

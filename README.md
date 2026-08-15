@@ -84,7 +84,7 @@ npx @deepseek-ai/dsh plugin --profile web add ./dsh-tally
 
 **`tally_budget(month?, amount?)`** — 预算：传 `amount` 设置/覆盖当月预算，省略则查询（预算/已支出/剩余/是否超支）；`tally_stats` 同步显示预算状态
 
-**`tally_export(month?)`** — CSV 导出：返回当月账目 CSV 文本（`date,type,category,amount,note`，RFC-4180 转义），**带 UTF-8 BOM**（存为 `.csv` 后 Excel/WPS 双击打开中文正常），默认当月
+**`tally_export(month?, path?)`** — CSV 导出：**真正写文件**（默认 `<账本目录>/exports/tally-YYYY-MM.csv`），带 **UTF-8 BOM**（Excel/WPS 双击打开中文正常），返回文件路径 + 前 3 行预览；传 `path` 自定义输出位置（相对路径基于 DSH home 解析）；`csv` 字段为原始内容供程序化处理
 
 ## 存储与安全
 

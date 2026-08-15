@@ -411,13 +411,16 @@ function toolExport(cfg) {
   return {
     name: 'tally_export',
     description:
-      'Export recorded entries as CSV text (header: date,type,category,amount,note). ' +
-      'Defaults to the current month. Fields with commas or quotes are RFC-4180 escaped.',
+      'Export recorded entries to a real CSV file (UTF-8 BOM, opens cleanly in Excel/WPS) and return its path. ' +
+      'Defaults to the current month. Pass path to choose the output location (relative paths resolve against the DSH home). ' +
+      'Omit path to write to <ledger-dir>/exports/tally-YYYY-MM.csv. ' +
+      'Returns { file, count, bytes, csv }; the csv field is the raw content for programmatic use, the render shows the file path and a short preview.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         month: { type: 'string', description: 'Month YYYY-MM (default current month)' },
+        path: { type: 'string', description: 'Optional output file path (default <ledger-dir>/exports/tally-YYYY-MM.csv)' },
       },
     },
     timeoutMs: 10000,
@@ -429,13 +432,19 @@ function toolExport(cfg) {
       const entries = data.entries
         .filter((e) => e.date.startsWith(month))
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt))
+      if (!entries.length) return { month, count: 0 }
       const rows = [['date', 'type', 'category', 'amount', 'note']]
       for (const e of entries) rows.push([e.date, e.type, e.category, String(e.amount), e.note || ''])
       // UTF-8 BOM prefix: Excel/WPS on zh-CN Windows would read the file as GBK
-      // (garbling Chinese) without it. Keep it on the CSV payload so saving the
-      // text as a .csv file opens correctly in Excel.
+      // (garbling Chinese) without it.
       const csv = '\uFEFF' + rows.map((r) => r.map(csvField).join(',')).join('\n')
-      return { month, count: entries.length, csv }
+      const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+      const outPath = args.path
+        ? path.resolve(home, String(args.path))
+        : path.join(path.dirname(file), 'exports', `tally-${month}.csv`)
+      mkdirSync(path.dirname(outPath), { recursive: true })
+      writeFileSync(outPath, csv, 'utf8')
+      return { month, count: entries.length, file: outPath, bytes: Buffer.byteLength(csv, 'utf8'), csv }
     },
   }
 }
@@ -444,7 +453,8 @@ function renderExport(v) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
   if (!v.count) return `[${v.month}] 没有记录可导出`
-  return `[${v.month}] 共 ${v.count} 笔，CSV（UTF-8 BOM，可直接存为 .csv 用 Excel/WPS 打开）：\n${v.csv}`
+  const preview = v.csv.split('\n').slice(0, 4).join('\n')
+  return `已导出 CSV（${v.count} 笔 · ${v.bytes} 字节 · UTF-8 BOM，Excel/WPS 可直接打开）：\n${v.file}\n预览：\n${preview}${v.count > 3 ? '\n...' : ''}`
 }
 
 export function apply(ctx, config) {
