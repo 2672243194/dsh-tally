@@ -136,6 +136,16 @@ dsh --profile headless "用 tally_add 记一笔早餐 12 元，然后 tally_stat
 - [ ] 周期账（每月自动重复的固定支出）
 - [ ] CSV 导入（从其他记账 App 迁移数据）
 
+## 支持
+
+如果 dsh-tally 对你有帮助，欢迎在 [GitHub](https://github.com/2672243194/dsh-tally) 点个 ⭐ Star。
+
+- 完全免费开源（MIT），本地存储、无广告、无数据收集、无 API key；
+- 独立开发维护，Star 数量是我判断是否继续投入迭代的直接依据；
+- 用的人越多，功能越完善——下一个功能很可能就是你需要的那个。
+
+一个 Star 不花一分钱，但能让这个项目走得更远。谢谢 ⭐
+
 ## License
 
 MIT
