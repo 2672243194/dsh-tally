@@ -35,11 +35,13 @@ function resolveStoragePath(cfg) {
 
 function loadLedger(file) {
   try {
-    if (!existsSync(file)) return { entries: [] }
+    if (!existsSync(file)) return { entries: [], budgets: {} }
     const data = JSON.parse(readFileSync(file, 'utf8'))
-    return Array.isArray(data.entries) ? data : { entries: [] }
+    if (!Array.isArray(data.entries)) return { entries: [], budgets: {} }
+    if (!data.budgets || typeof data.budgets !== 'object') data.budgets = {}
+    return data
   } catch {
-    return { entries: [] }
+    return { entries: [], budgets: {} }
   }
 }
 
@@ -85,6 +87,10 @@ function entryLine(e, currency) {
   const type = e.type === 'income' ? '收' : '支'
   const note = e.note ? ` ${e.note}` : ''
   return `${fmtDate(e.date)} ${type} ${e.category} ${fmtMoney(e.amount, currency)}${note} (id: ${shortId(e.id)})`
+}
+
+function signMoney(n, currency) {
+  return n >= 0 ? `+${fmtMoney(n, currency)}` : `-${fmtMoney(-n, currency)}`
 }
 
 // ---- tally_add ----
@@ -188,13 +194,15 @@ function toolStats(cfg) {
   return {
     name: 'tally_stats',
     description:
-      'Monthly summary: total expense/income, balance, top categories and daily average. ' +
+      'Summary statistics. Pass month for a monthly summary (expense/income/balance, top categories, daily average, budget status); ' +
+      'pass year (without month) for a full-year report (12 months + totals). ' +
       'Compact single-block output to save tokens.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         month: { type: 'string', description: 'Month YYYY-MM (default current month)' },
+        year: { type: 'string', description: 'Year YYYY for annual report (use alone, without month)' },
       },
     },
     timeoutMs: 10000,
@@ -202,7 +210,36 @@ function toolStats(cfg) {
     async execute(args) {
       const file = resolveStoragePath(cfg)
       const data = loadLedger(file)
-      const month = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : todayISO().slice(0, 7)
+      const yearArg = /^\d{4}$/.test(args.year || '') ? args.year : ''
+      const monthArg = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : ''
+      if (yearArg && !monthArg) {
+        const months = []
+        for (let m = 1; m <= 12; m++) {
+          const prefix = `${yearArg}-${String(m).padStart(2, '0')}`
+          const es = data.entries.filter((e) => e.date.startsWith(prefix))
+          let exp = 0
+          let inc = 0
+          for (const e of es) if (e.type === 'income') inc += e.amount; else exp += e.amount
+          months.push({
+            month: prefix,
+            expense: Math.round(exp * 100) / 100,
+            income: Math.round(inc * 100) / 100,
+            balance: Math.round((inc - exp) * 100) / 100,
+            count: es.length,
+          })
+        }
+        const totalExp = months.reduce((s, m) => s + m.expense, 0)
+        const totalInc = months.reduce((s, m) => s + m.income, 0)
+        return {
+          year: yearArg,
+          months,
+          expense: Math.round(totalExp * 100) / 100,
+          income: Math.round(totalInc * 100) / 100,
+          balance: Math.round((totalInc - totalExp) * 100) / 100,
+          count: months.reduce((s, m) => s + m.count, 0),
+        }
+      }
+      const month = monthArg || todayISO().slice(0, 7)
       const entries = data.entries.filter((e) => e.date.startsWith(month))
       let expense = 0
       let income = 0
@@ -216,6 +253,7 @@ function toolStats(cfg) {
       }
       const top = [...byCat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
       const days = new Set(entries.map((e) => e.date)).size || 1
+      const budget = data.budgets[month] || 0
       return {
         month,
         expense: Math.round(expense * 100) / 100,
@@ -224,6 +262,8 @@ function toolStats(cfg) {
         count: entries.length,
         dailyAvg: Math.round((expense / days) * 100) / 100,
         topCategories: top.map(([c, a]) => ({ category: c, amount: Math.round(a * 100) / 100 })),
+        budget: Math.round(budget * 100) / 100,
+        budgetOver: budget > 0 && expense > budget,
       }
     },
   }
@@ -232,11 +272,23 @@ function toolStats(cfg) {
 function renderStats(v, cfg) {
   if (typeof v === 'string') return v
   if (v.error) return `Error: ${v.error}`
-  const bal = v.balance >= 0 ? `+${fmtMoney(v.balance, cfg.currency)}` : `-${fmtMoney(-v.balance, cfg.currency)}`
+  if (v.year) {
+    const rows = v.months
+      .filter((m) => m.count > 0)
+      .map((m) => `  ${Number(m.month.slice(5))}月 支出 ${fmtMoney(m.expense, cfg.currency)} · 收入 ${fmtMoney(m.income, cfg.currency)} · 结余 ${signMoney(m.balance, cfg.currency)} · ${m.count} 笔`)
+    return `[${v.year}] 全年支出 ${fmtMoney(v.expense, cfg.currency)} · 收入 ${fmtMoney(v.income, cfg.currency)} · 结余 ${signMoney(v.balance, cfg.currency)} · ${v.count} 笔\n${rows.join('\n') || '  (无记录)'}`
+  }
+  const bal = signMoney(v.balance, cfg.currency)
   const top = v.topCategories.length
     ? `\n类别 Top：${v.topCategories.map((t) => `${t.category} ${fmtMoney(t.amount, cfg.currency)}`).join(' · ')}`
     : ''
-  return `[${v.month}] 支出 ${fmtMoney(v.expense, cfg.currency)} · 收入 ${fmtMoney(v.income, cfg.currency)} · 结余 ${bal} · ${v.count} 笔 · 日均支出 ${fmtMoney(v.dailyAvg, cfg.currency)}${top}`
+  let budgetNote = ''
+  if (v.budget) {
+    budgetNote = v.budgetOver
+      ? `\n⚠️ 预算 ${fmtMoney(v.budget, cfg.currency)}，已超支 ${fmtMoney(v.expense - v.budget, cfg.currency)}`
+      : `\n预算 ${fmtMoney(v.budget, cfg.currency)} · 剩余 ${fmtMoney(v.budget - v.expense, cfg.currency)}`
+  }
+  return `[${v.month}] 支出 ${fmtMoney(v.expense, cfg.currency)} · 收入 ${fmtMoney(v.income, cfg.currency)} · 结余 ${bal} · ${v.count} 笔 · 日均支出 ${fmtMoney(v.dailyAvg, cfg.currency)}${top}${budgetNote}`
 }
 
 // ---- tally_remove ----
@@ -288,11 +340,116 @@ function renderRemove(v, cfg) {
   return '操作未完成'
 }
 
+// ---- tally_budget ----
+function toolBudget(cfg) {
+  return {
+    name: 'tally_budget',
+    description:
+      'Get or set a monthly expense budget. ' +
+      'Pass amount to set (or overwrite) the budget for a month; omit amount to query current status. ' +
+      'tally_stats also reports budget status when one is set.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        month: { type: 'string', description: 'Month YYYY-MM (default current month)' },
+        amount: { type: 'number', description: 'Budget amount in yuan (positive, up to 2 decimals). Omit to query.' },
+      },
+    },
+    timeoutMs: 5000,
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a, v) => [{ type: 'text', text: renderBudget(v, cfg) }] },
+    async execute(args) {
+      const file = resolveStoragePath(cfg)
+      const month = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : todayISO().slice(0, 7)
+      const data = loadLedger(file)
+      if (args.amount !== undefined && args.amount !== null) {
+        const amount = normalizeAmount(args.amount)
+        if (amount === null) return { error: 'amount must be a positive number (max 2 decimals)' }
+        const prev = data.budgets[month] || 0
+        await enqueueWrite(() => {
+          const d = loadLedger(file)
+          d.budgets[month] = amount
+          saveLedger(file, d)
+        })
+        return { month, budget: amount, prevBudget: prev, action: 'set' }
+      }
+      const budget = data.budgets[month] || 0
+      const spent = data.entries
+        .filter((e) => e.date.startsWith(month) && e.type === 'expense')
+        .reduce((s, e) => s + e.amount, 0)
+      return {
+        month,
+        budget: Math.round(budget * 100) / 100,
+        spent: Math.round(spent * 100) / 100,
+        remaining: Math.round((budget - spent) * 100) / 100,
+        over: budget > 0 && spent > budget,
+      }
+    },
+  }
+}
+
+function renderBudget(v, cfg) {
+  if (typeof v === 'string') return v
+  if (v.error) return `Error: ${v.error}`
+  if (v.action === 'set') {
+    return v.prevBudget
+      ? `预算已更新：${v.month} ${fmtMoney(v.prevBudget, cfg.currency)} → ${fmtMoney(v.budget, cfg.currency)}`
+      : `预算已设置：${v.month} ${fmtMoney(v.budget, cfg.currency)}`
+  }
+  if (!v.budget) return `[${v.month}] 未设置预算`
+  const rem = v.remaining >= 0 ? `剩余 ${fmtMoney(v.remaining, cfg.currency)}` : `已超支 ${fmtMoney(-v.remaining, cfg.currency)}`
+  return `[${v.month}] 预算 ${fmtMoney(v.budget, cfg.currency)} · 已支出 ${fmtMoney(v.spent, cfg.currency)} · ${rem}${v.over ? ' ⚠️' : ''}`
+}
+
+// ---- tally_export ----
+function csvField(s) {
+  const v = String(s)
+  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
+}
+
+function toolExport(cfg) {
+  return {
+    name: 'tally_export',
+    description:
+      'Export recorded entries as CSV text (header: date,type,category,amount,note). ' +
+      'Defaults to the current month. Fields with commas or quotes are RFC-4180 escaped.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        month: { type: 'string', description: 'Month YYYY-MM (default current month)' },
+      },
+    },
+    timeoutMs: 10000,
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_a, v) => [{ type: 'text', text: renderExport(v) }] },
+    async execute(args) {
+      const file = resolveStoragePath(cfg)
+      const data = loadLedger(file)
+      const month = /^\d{4}-\d{2}$/.test(args.month || '') ? args.month : todayISO().slice(0, 7)
+      const entries = data.entries
+        .filter((e) => e.date.startsWith(month))
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt))
+      const rows = [['date', 'type', 'category', 'amount', 'note']]
+      for (const e of entries) rows.push([e.date, e.type, e.category, String(e.amount), e.note || ''])
+      return { month, count: entries.length, csv: rows.map((r) => r.map(csvField).join(',')).join('\n') }
+    },
+  }
+}
+
+function renderExport(v) {
+  if (typeof v === 'string') return v
+  if (v.error) return `Error: ${v.error}`
+  if (!v.count) return `[${v.month}] 没有记录可导出`
+  return `[${v.month}] 共 ${v.count} 笔，CSV：\n${v.csv}`
+}
+
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config || {}) }
-  console.log('[dsh-tally] plugin loaded; tools tally_add, tally_list, tally_stats, tally_remove')
+  console.log('[dsh-tally] plugin loaded; tools tally_add, tally_list, tally_stats, tally_remove, tally_budget, tally_export')
   ctx.tools.register(toolAdd(cfg))
   ctx.tools.register(toolList(cfg))
   ctx.tools.register(toolStats(cfg))
   ctx.tools.register(toolRemove(cfg))
+  ctx.tools.register(toolBudget(cfg))
+  ctx.tools.register(toolExport(cfg))
 }

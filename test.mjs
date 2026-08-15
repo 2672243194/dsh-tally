@@ -18,7 +18,9 @@ const add = tools.find((t) => t.name === 'tally_add')
 const list = tools.find((t) => t.name === 'tally_list')
 const stats = tools.find((t) => t.name === 'tally_stats')
 const remove = tools.find((t) => t.name === 'tally_remove')
-assert.ok(add && list && stats && remove, 'all four tools must register')
+const budget = tools.find((t) => t.name === 'tally_budget')
+const exportT = tools.find((t) => t.name === 'tally_export')
+assert.ok(add && list && stats && remove && budget && exportT, 'all six tools must register')
 
 let passed = 0
 function ok(name, fn) {
@@ -151,6 +153,104 @@ await aok('compact renders with currency and Chinese', async () => {
   const st = stats.output.render(null, s)[0].text
   assert.ok(st.includes('支出 ¥12.50'))
   assert.ok(st.includes('结余'))
+})
+
+console.log('tally_budget')
+await aok('sets and queries a monthly budget', async () => {
+  const set = await budget.execute({ month: '2026-03', amount: 200 })
+  assert.equal(set.action, 'set')
+  assert.equal(set.budget, 200)
+  const q = await budget.execute({ month: '2026-03' })
+  assert.equal(q.budget, 200)
+  assert.equal(q.spent, 150) // 20 + 30 + 100
+  assert.equal(q.remaining, 50)
+  assert.equal(q.over, false)
+})
+
+await aok('overwrites existing budget', async () => {
+  const set = await budget.execute({ month: '2026-03', amount: 300 })
+  assert.equal(set.prevBudget, 200)
+  assert.equal(set.budget, 300)
+})
+
+await aok('flags over-budget and rejects bad amounts', async () => {
+  await budget.execute({ month: '2026-02', amount: 100 })
+  const q = await budget.execute({ month: '2026-02' })
+  assert.equal(q.spent, 999)
+  assert.equal(q.over, true)
+  assert.ok((await budget.execute({ amount: 0 })).error)
+  assert.ok((await budget.execute({ amount: -1 })).error)
+})
+
+await aok('stats reports budget status (over / within)', async () => {
+  const s3 = await stats.execute({ month: '2026-03' })
+  assert.equal(s3.budget, 300)
+  assert.equal(s3.budgetOver, false)
+  const s2 = await stats.execute({ month: '2026-02' })
+  assert.equal(s2.budget, 100)
+  assert.equal(s2.budgetOver, true)
+  const text = stats.output.render(null, s2)[0].text
+  assert.ok(text.includes('超支'), `render should flag over-budget: ${text}`)
+})
+
+await aok('budget render: no budget set / set / query', async () => {
+  const none = budget.output.render(null, await budget.execute({ month: '2020-01' }))[0].text
+  assert.ok(none.includes('未设置预算'))
+  const set = budget.output.render(null, await budget.execute({ month: '2026-04', amount: 500 }))[0].text
+  assert.ok(set.includes('¥500.00'))
+  const q = budget.output.render(null, await budget.execute({ month: '2026-04' }))[0].text
+  assert.ok(q.includes('已支出 ¥10.00'))
+})
+
+console.log('annual stats')
+await aok('year report aggregates 12 months + totals', async () => {
+  const r = await stats.execute({ year: '2026' })
+  assert.equal(r.count, 20) // 03:4 + 02:1 + 04:10 + 05:1 + 08:4
+  assert.equal(r.expense, 1223.73) // 150 + 999 + 10 + 12.5 + 52.23
+  assert.equal(r.income, 8000)
+  assert.equal(r.balance, 6776.27)
+  const m3 = r.months.find((m) => m.month === '2026-03')
+  assert.equal(m3.expense, 150)
+  assert.equal(m3.count, 4)
+  assert.equal(r.months.length, 12, 'always 12 month slots')
+  const text = stats.output.render(null, r)[0].text
+  assert.ok(text.includes('全年支出'))
+  assert.ok(text.includes('3月'), `render lists active months: ${text}`)
+})
+
+await aok('year param ignored when month present', async () => {
+  const r = await stats.execute({ month: '2026-03', year: '2026' })
+  assert.equal(r.month, '2026-03')
+  assert.equal(r.year, undefined)
+})
+
+console.log('tally_export')
+await aok('exports CSV with header and entries sorted by date', async () => {
+  const r = await exportT.execute({ month: '2026-03' })
+  assert.equal(r.count, 4) // 20/30/100 expense + 8000 income
+  const lines = r.csv.split('\n')
+  assert.equal(lines.length, 5) // header + 4
+  assert.equal(lines[0], 'date,type,category,amount,note')
+  assert.ok(lines[1].startsWith('2026-03-01,expense,餐饮,20,'), `sorted first: ${lines[1]}`)
+  assert.ok(lines[4].startsWith('2026-03-10,income,工资,8000,'), `income last: ${lines[4]}`)
+  const text = exportT.output.render(null, r)[0].text
+  assert.ok(text.includes('共 4 笔'))
+})
+
+await aok('escapes commas and quotes per RFC-4180', async () => {
+  await add.execute({ amount: 7, category: '其他', date: '2026-03-20', note: 'a,b"c' })
+  const r = await exportT.execute({ month: '2026-03' })
+  assert.equal(r.count, 5)
+  const line = r.csv.split('\n').find((l) => l.includes('2026-03-20'))
+  assert.ok(line, 'exported note row exists')
+  assert.ok(line.includes('"a,b""c"'), `note escaped: ${line}`)
+})
+
+await aok('empty month export returns zero count', async () => {
+  const r = await exportT.execute({ month: '2020-01' })
+  assert.equal(r.count, 0)
+  const text = exportT.output.render(null, r)[0].text
+  assert.ok(text.includes('没有记录'))
 })
 
 console.log(`\n${passed} assertions passed`)
