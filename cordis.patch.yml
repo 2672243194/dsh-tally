@@ -1,0 +1,6 @@
+- insert:
+    - id: dsh-tally
+      name: dsh-tally
+      config:
+        storagePath: ''
+        currency: '¥'
